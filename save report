@@ -1,0 +1,85 @@
+
+
+<?php
+session_start();
+require_once 'includes/db.php';
+
+if(!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true){
+    echo json_encode(["status" => "error", "message" => "Unauthorized"]);
+    exit;
+}
+
+if($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    echo json_encode(["status" => "error", "message" => "Invalid request method"]);
+    exit;
+}
+
+$user_id = $_SESSION["id"];
+$prop_id = intval($_POST['proposal_id'] ?? 0);
+
+if(!$prop_id) {
+    echo json_encode(["status" => "error", "message" => "Missing proposal ID"]);
+    exit;
+}
+
+// Ensure the proposal belongs to user
+$q = "SELECT status FROM proposals WHERE id = ? AND user_id = ?";
+$st = $conn->prepare($q);
+$st->bind_param("ii", $prop_id, $user_id);
+$st->execute();
+$res = $st->get_result();
+
+if($res->num_rows === 0) {
+    echo json_encode(["status" => "error", "message" => "Proposal not found or unauthorized"]);
+    exit;
+}
+$st->close();
+
+if(!isset($_FILES['report_pdf']) || $_FILES['report_pdf']['error'] !== UPLOAD_ERR_OK) {
+    echo json_encode(["status" => "error", "message" => "Failed to upload generated PDF"]);
+    exit;
+}
+
+$upload_dir = 'reports/';
+
+// Create directory with proper error handling
+if(!is_dir($upload_dir)) {
+    if(!mkdir($upload_dir, 0755, true)) {
+        $error = "Failed to create reports directory. Check permissions on parent directory.";
+        error_log("api_save_report.php: " . $error . " | CWD: " . getcwd() . " | User: " . shell_exec('whoami'));
+        echo json_encode(["status" => "error", "message" => $error]);
+        exit;
+    }
+}
+
+// Verify directory is writable
+if(!is_writable($upload_dir)) {
+    $error = "Reports directory exists but is not writable. Current permissions: " . decoct(fileperms($upload_dir)) . ". Contact admin.";
+    error_log("api_save_report.php: " . $error);
+    echo json_encode(["status" => "error", "message" => $error]);
+    exit;
+}
+
+$file_name = 'Report_PRO_' . sprintf('%04d', $prop_id) . '_' . time() . '.pdf';
+$path = $upload_dir . $file_name;
+$tmp_path = $_FILES['report_pdf']['tmp_name'];
+
+// Debug logging
+error_log("api_save_report.php: Uploading file | tmp_path: $tmp_path | dest: $path | tmp_exists: " . (file_exists($tmp_path) ? "yes" : "no") . " | tmp_readable: " . (is_readable($tmp_path) ? "yes" : "no"));
+
+if(move_uploaded_file($tmp_path, $path)) {
+    // Save to DB
+    $uQ = "UPDATE proposals SET report_path = ? WHERE id = ?";
+    $stU = $conn->prepare($uQ);
+    $stU->bind_param("si", $path, $prop_id);
+    if($stU->execute()){
+         echo json_encode(["status" => "success", "report_path" => $path]);
+    } else {
+         echo json_encode(["status" => "error", "message" => "Database link failed"]);
+    }
+    $stU->close();
+} else {
+    $error_msg = "Failed to move uploaded file to: $path | Reports dir writable: " . (is_writable($upload_dir) ? "yes" : "no");
+    error_log("api_save_report.php: " . $error_msg);
+    echo json_encode(["status" => "error", "message" => $error_msg, "debug_info" => ["tmp_file" => $tmp_path, "destination" => $path]]);
+}
